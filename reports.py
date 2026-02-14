@@ -71,9 +71,67 @@ def containment_tree(conn, root):
             children[n["parent"]].append(n["id"])
     return children
 
-def build_tree(root):
+
+def containment_nodes(conn, root):
+    sql = """
+    WITH RECURSIVE deps(id, parent) AS (
+        SELECT ?, NULL
+        UNION
+        SELECT d.child_version_id, d.parent_version_id
+        FROM element_version_dependencies d
+        JOIN deps ON d.parent_version_id = deps.id
+    )
+    SELECT id FROM deps;
+    """
+    return {r["id"] for r in conn.execute(sql, (root,))}
+
+
+def get_element_info(conn, version_id):
+    row = conn.execute("SELECT element_id, version FROM element_versions WHERE id = ?", (version_id,)).fetchone()
+    if row:
+        return row["element_id"], row["version"]
+    return None, None
+
+def build_tree(current_root, predecessor_root=None):
     conn = get_connection()
-    children = containment_tree(conn, root)
+    children = containment_tree(conn, current_root)
+
+    predecessor_nodes = None
+    if predecessor_root:
+        predecessor_nodes = containment_nodes(conn, predecessor_root)
+        logger.info("build_tree: current_root=%s predecessor_root=%s predecessor_nodes=%d", current_root, predecessor_root, len(predecessor_nodes))
+
+    def compute_interval_for_element(node):
+        element_id, _ = get_element_info(conn, node)
+        pred_version = None
+        if predecessor_nodes and element_id:
+            preds = list(predecessor_nodes)
+            placeholders = ",".join("?" for _ in preds)
+            sql = f"SELECT id, version FROM element_versions WHERE element_id = ? AND id IN ({placeholders}) ORDER BY version DESC LIMIT 1"
+            params = [element_id] + preds
+            row = conn.execute(sql, params).fetchone()
+            if row:
+                pred_version = row["id"]
+
+        introduced = []
+        fixes = []
+        # Only compute interval changes if we found a predecessor version for this element
+        if pred_version:
+            node_hist = history_closure(conn, node)
+            pred_hist = history_closure(conn, pred_version)
+            interval_nodes = node_hist - pred_hist
+            if interval_nodes:
+                preds = list(interval_nodes)
+                placeholders = ",".join("?" for _ in preds)
+                sql = f"SELECT t.id, t.type, t.fixes_ticket_id, tv.version_id, t.title, t.description FROM tickets t JOIN ticket_versions tv ON t.id = tv.ticket_id WHERE tv.version_id IN ({placeholders})"
+                for row in conn.execute(sql, preds):
+                    if row["type"] == "bug":
+                        introduced.append({"id": row["id"], "title": row["title"], "description": row["description"]})
+                    elif row["type"] == "bugfix":
+                        fixes.append({"id": row["id"], "title": row["title"], "description": row["description"], "neutralises": row["fixes_ticket_id"]})
+
+        logger.debug("compute_interval_for_element: node=%s pred_version=%s introduced=%d fixes=%d", node, pred_version, len(introduced), len(fixes))
+        return pred_version, {"introduced": introduced, "fixes": fixes}
 
     def build(node):
         logger.debug("build: entering node=%s children=%s", node, children.get(node, []))
@@ -84,14 +142,19 @@ def build_tree(root):
             "bugs": len(bugs) + sum(s["summary"]["bugs"] for s in subnodes)
         }
         logger.info("build: node=%s elements=%d bugs=%d", node, summary["elements"], summary["bugs"])
-        return {
+        node_entry = {
             "version": node,
             "active_bugs": bugs,
             "children": subnodes,
             "summary": summary
         }
+        if predecessor_root is not None:
+            pred_ver, changes = compute_interval_for_element(node)
+            node_entry["predecessor_version"] = pred_ver
+            node_entry["since_predecessor"] = changes
+        return node_entry
 
-    tree = build(root)
+    tree = build(current_root)
     conn.close()
     return tree
 
@@ -100,14 +163,42 @@ def export_json(data, filename):
 
 def export_html(data, filename, title):
     def render(node):
-        html = f"<li>{node['version']} (bugs: {node['summary']['bugs']})"
-        # Render active bug details
+        html = f"<li><strong>{node['version']}</strong> (bugs: {node['summary']['bugs']})"
+
+        # Predecessor mapping for this element (if computed)
+        if "predecessor_version" in node:
+            pred = node["predecessor_version"] or "(none)"
+            html += f"<div style='margin-left:8px'><em>Predecessor:</em> {pred}</div>"
+
+        # Changes since predecessor for this element
+        if node.get("since_predecessor"):
+            ch = node["since_predecessor"]
+            html += "<div style='margin-left:8px'><em>Since predecessor:</em>"
+            # Introduced bugs
+            html += "<div><strong>Introduced:</strong><ul>"
+            if ch.get("introduced"):
+                for b in ch["introduced"]:
+                    html += f"<li>{b['id']}: {b['title']} - {b.get('description','')}</li>"
+            else:
+                html += "<li>(none)</li>"
+            html += "</ul></div>"
+            # Fixes
+            html += "<div><strong>Fixes:</strong><ul>"
+            if ch.get("fixes"):
+                for f in ch["fixes"]:
+                    html += f"<li>{f['id']} (neutralises {f.get('neutralises')}): {f['title']}</li>"
+            else:
+                html += "<li>(none)</li>"
+            html += "</ul></div>"
+            html += "</div>"
+
+        # Active bug details (current active bugs on this version)
         if node.get("active_bugs"):
-            html += "<ul>"
+            html += "<div style='margin-left:8px'><strong>Active bugs:</strong><ul>"
             for bug in node["active_bugs"]:
                 desc = bug.get("description") or ""
-                html += f"<li><strong>{bug['id']}</strong>: {bug['title']} - {desc}</li>"
-            html += "</ul>"
+                html += f"<li>{bug['id']}: {bug['title']} - {desc}</li>"
+            html += "</ul></div>"
 
         # Render child nodes
         if node["children"]:

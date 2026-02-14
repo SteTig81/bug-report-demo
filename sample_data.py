@@ -1,5 +1,8 @@
 
 from db import get_connection
+import logging
+
+logger = logging.getLogger(__name__)
 
 def create_sample_data():
     conn = get_connection()
@@ -67,3 +70,4 @@ def create_sample_data():
 
     conn.commit()
     conn.close()
+    logger.info("Inserted sample elements=%d versions=%d tickets=%d", len(elements), len(versions), len(tickets))
