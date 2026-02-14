@@ -208,6 +208,19 @@ def export_html(data, filename, title):
                 if bug_id not in aggregated:
                     aggregated[bug_id] = bug_info
         return aggregated
+    
+    def find_bug_path(node, bug_id):
+        """Find the path from node down to where bug_id exists. Returns list of version_ids."""
+        # Check if bug is directly in this node
+        for bug in node.get("active_bugs", []):
+            if bug["id"] == bug_id:
+                return [node["version"]]
+        # Check children recursively
+        for child in node.get("children", []):
+            path = find_bug_path(child, bug_id)
+            if path:
+                return [node["version"]] + path
+        return None
 
     def render_bom(node):
         """Render BOM (hierarchy only, no details)."""
@@ -296,7 +309,7 @@ def export_html(data, filename, title):
                 if ch.get("fixes"):
                     for f in ch["fixes"]:
                         neutralises_link = f"<a href='#bug-{f.get('neutralises')}'>{f.get('neutralises')}</a>"
-                        html += f"<li><a href='#bug-{f['id']}'>{f['id']}</a> (neutralises {neutralises_link}): {f['title']}</li>"
+                        html += f"<li><a href='#fix-{f['id']}'>{f['id']}</a> (neutralises {neutralises_link}): {f['title']}</li>"
                 else:
                     html += "<li>(none)</li>"
                 html += "</ul></div>"
@@ -344,19 +357,17 @@ def export_html(data, filename, title):
             if inherited_bugs:
                 html_entry += "<div><strong>Active bugs in child elements:</strong><ul>"
                 for bug in sorted(inherited_bugs.values(), key=lambda b: b.get("id", "")):
-                    # Find which version this bug comes from for display
-                    bug_source_version_id = None
-                    for v_id in all_versions:
-                        for active_bug in all_versions[v_id].get("active_bugs", []):
-                            if active_bug["id"] == bug["id"]:
-                                bug_source_version_id = v_id
-                                break
-                        if bug_source_version_id:
-                            break
-                    if bug_source_version_id:
-                        bug_source_display = get_element_display_name(conn, bug_source_version_id)
-                        bug_source_display = bug_source_display.replace(f"(Id: {bug_source_version_id})", f"(Id: <a href='#{bug_source_version_id}'>{bug_source_version_id}</a>)")
-                        html_entry += f"<li><a href='#bug-{bug['id']}'>{bug['id']}</a> | {bug_source_display} | {bug['title']}</li>"
+                    # Find the path from current node to where this bug exists
+                    path = find_bug_path(node, bug["id"])
+                    if path and len(path) > 1:
+                        # Build path display: skip the first element (current node) and show the path
+                        path_display_parts = []
+                        for version_id in path[1:]:  # Skip current node, show children onwards
+                            elem_display = get_element_display_name(conn, version_id)
+                            elem_display = elem_display.replace(f"(Id: {version_id})", f"(Id: <a href='#{version_id}'>{version_id}</a>)")
+                            path_display_parts.append(elem_display)
+                        path_display = " -> ".join(path_display_parts)
+                        html_entry += f"<li><a href='#bug-{bug['id']}'>{bug['id']}</a> | {path_display} | {bug['title']}</li>"
                     else:
                         html_entry += f"<li><a href='#bug-{bug['id']}'>{bug['id']}</a> | {bug['title']}</li>"
                 html_entry += "</ul></div>"
@@ -369,12 +380,41 @@ def export_html(data, filename, title):
         detailed_html += html_entry
     detailed_html += "</ul>"
     
-    # Render bug details section
+    # Collect fixes mentioned in since_predecessor sections
+    all_fixes = {}
+    bug_to_fixes = defaultdict(list)
+    for node in all_versions.values():
+        sp = node.get("since_predecessor")
+        if sp and sp.get("fixes"):
+            for f in sp.get("fixes", []):
+                all_fixes[f["id"]] = f
+                if f.get("neutralises"):
+                    bug_to_fixes[f.get("neutralises")].append(f["id"])
+                    # ensure neutralised bug appears in all_bugs (even if not active)
+                    if f.get("neutralises") not in all_bugs:
+                        row = conn.execute("SELECT id, title, description FROM tickets WHERE id = ?", (f.get("neutralises"),)).fetchone()
+                        if row:
+                            all_bugs[row["id"]] = {"title": row["title"], "description": row["description"], "versions": []}
+
+    # Render bug details section (include bugs that were neutralised by fixes)
     bug_details_html = "<ul>"
     for bug_id in sorted(all_bugs.keys()):
         bug_info = all_bugs[bug_id]
-        bug_details_html += f"<li id='bug-{bug_id}'><strong>{bug_id}</strong><div>Title: {bug_info['title']}</div><div>Description: {bug_info['description']}</div></li>"
+        bug_details_html += f"<li id='bug-{bug_id}'><strong>{bug_id}</strong><div>Title: {bug_info.get('title','')}</div><div>Description: {bug_info.get('description','')}</div>"
+        if bug_to_fixes.get(bug_id):
+            fixes_links = ", ".join(f"<a href='#fix-{fid}'>{fid}</a>" for fid in sorted(bug_to_fixes[bug_id]))
+            bug_details_html += f"<div>Fixed by: {fixes_links}</div>"
+        bug_details_html += "</li>"
     bug_details_html += "</ul>"
+
+    # Render fix details section
+    fix_details_html = "<ul>"
+    for fix_id in sorted(all_fixes.keys()):
+        fix = all_fixes[fix_id]
+        neutralises = fix.get('neutralises')
+        neutralises_link = f"<a href='#bug-{neutralises}'>{neutralises}</a>" if neutralises else "(none)"
+        fix_details_html += f"<li id='fix-{fix_id}'><strong>{fix_id}</strong><div>Title: {fix.get('title','')}</div><div>Description: {fix.get('description','')}</div><div>Neutralises: {neutralises_link}</div></li>"
+    fix_details_html += "</ul>"
 
     html = f"""
     <html>
@@ -393,6 +433,9 @@ def export_html(data, filename, title):
     
     <h2>4. Bug Details</h2>
     {bug_details_html}
+
+    <h2>5. Fix Details</h2>
+    {fix_details_html}
     
     </body>
     </html>
