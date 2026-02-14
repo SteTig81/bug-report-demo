@@ -1,6 +1,8 @@
 
 import argparse
 import logging
+from pathlib import Path
+from datetime import datetime
 from db import initialize_database
 from sample_data import create_sample_data
 from reports import build_tree, export_json, export_html
@@ -39,10 +41,24 @@ def main():
         logging.info("Generating report for current_root=%s predecessor_root=%s format=%s",
                      args.current_root, args.predecessor_root, args.format)
         tree = build_tree(args.current_root, predecessor_root=args.predecessor_root)
+
+        reports_dir = Path("reports")
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
+        base = f"bug-report_{args.current_root}"
+        if args.predecessor_root:
+            base += f"_{args.predecessor_root}"
+        base = base + f"_{timestamp}"
+
         if args.format in ("json", "both"):
-            export_json(tree, "report.json")
+            json_path = reports_dir / f"{base}.json"
+            export_json(tree, str(json_path))
+            logging.info("Wrote JSON report: %s", json_path)
         if args.format in ("html", "both"):
-            export_html(tree, "report.html", "Bug-Report")
+            html_path = reports_dir / f"{base}.html"
+            export_html(tree, str(html_path), "Bug-Report")
+            logging.info("Wrote HTML report: %s", html_path)
+
         logging.info("Report generated for current_root %s", args.current_root)
 
     else:

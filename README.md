@@ -10,4 +10,6 @@ See DESIGN.md for more details.
 
 # Usage
 
-    python cli.py report --root APP_v2 --format both
+    python cli.py report -c APP_v2 -p APP_v1 --format both
+
+Find the reports in a sub-folder "reports".
