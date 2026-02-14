@@ -41,7 +41,9 @@ def create_sample_data():
     deps = [
         ("APP_v2", "LIB_v3"),
         ("APP_v2", "UTIL_v1"),
-        ("LIB_v3", "UTIL_v1")
+        ("LIB_v3", "UTIL_v1"),
+        ("APP_v1", "LIB_v1"),
+        ("APP_v1", "UTIL_v1")
     ]
     cur.executemany(
         "INSERT OR IGNORE INTO element_version_dependencies VALUES (?,?)",
