@@ -79,6 +79,15 @@ def create_sample_data():
         ticket_versions
     )
 
+    # Map fixes to the bugs they neutralise (support multiple neutralisations)
+    fix_neutralises = [
+        ("FIX1", "BUG1"),
+    ]
+    cur.executemany(
+        "INSERT OR IGNORE INTO fix_neutralises VALUES (?,?)",
+        fix_neutralises
+    )
+
     conn.commit()
     conn.close()
     logger.info("Inserted sample elements=%d versions=%d tickets=%d", len(elements), len(versions), len(tickets))

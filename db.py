@@ -55,6 +55,14 @@ def initialize_database():
         FOREIGN KEY (fixes_ticket_id) REFERENCES tickets(id)
     );
 
+    CREATE TABLE IF NOT EXISTS fix_neutralises (
+        fix_id TEXT NOT NULL,
+        bug_id TEXT NOT NULL,
+        PRIMARY KEY (fix_id, bug_id),
+        FOREIGN KEY (fix_id) REFERENCES tickets(id),
+        FOREIGN KEY (bug_id) REFERENCES tickets(id)
+    );
+
     CREATE TABLE IF NOT EXISTS ticket_versions (
         ticket_id TEXT NOT NULL,
         version_id TEXT NOT NULL,

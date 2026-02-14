@@ -40,9 +40,18 @@ def active_bugs(conn, version_id):
                     "description": row["description"]
                 }
                 logger.debug("active_bugs: version=%s introduced_bug=%s", version_id, row["id"])
-            elif row["type"] == "bugfix" and row["fixes_ticket_id"]:
-                fixes.add(row["fixes_ticket_id"])
-                logger.debug("active_bugs: version=%s bugfix=%s neutralises=%s", version_id, row["id"], row["fixes_ticket_id"])
+            elif row["type"] == "bugfix":
+                # A bugfix may neutralise multiple bugs via fix_neutralises table
+                fix_id = row["id"]
+                # first try fix_neutralises
+                nrows = [r["bug_id"] for r in conn.execute("SELECT bug_id FROM fix_neutralises WHERE fix_id = ?", (fix_id,))]
+                if nrows:
+                    for nid in nrows:
+                        fixes.add(nid)
+                        logger.debug("active_bugs: version=%s bugfix=%s neutralises=%s", version_id, fix_id, nid)
+                elif row.get("fixes_ticket_id"):
+                    fixes.add(row["fixes_ticket_id"])
+                    logger.debug("active_bugs: version=%s bugfix=%s neutralises=%s (legacy)", version_id, fix_id, row["fixes_ticket_id"])
 
     neutralised = [i for i in introduced.keys() if i in fixes]
     if neutralised:
@@ -141,7 +150,11 @@ def build_tree(current_root, predecessor_root=None):
                     if row["type"] == "bug":
                         introduced.append({"id": row["id"], "title": row["title"], "description": row["description"]})
                     elif row["type"] == "bugfix":
-                        fixes.append({"id": row["id"], "title": row["title"], "description": row["description"], "neutralises": row["fixes_ticket_id"]})
+                        # gather neutralises list from fix_neutralises table (fallback to legacy column)
+                        fix_id = row["id"]
+                        nrows = [r["bug_id"] for r in conn.execute("SELECT bug_id FROM fix_neutralises WHERE fix_id = ?", (fix_id,))]
+                        neutralises = nrows if nrows else ([row["fixes_ticket_id"]] if row.get("fixes_ticket_id") else [])
+                        fixes.append({"id": row["id"], "title": row["title"], "description": row["description"], "neutralises": neutralises})
 
         logger.debug("compute_interval_for_element: node=%s pred_version=%s introduced=%d fixes=%d", node, pred_version, len(introduced), len(fixes))
         return pred_version, {"introduced": introduced, "fixes": fixes}
@@ -267,6 +280,13 @@ def export_html(data, filename, title):
         html += "</li>"
         return html
 
+    def render_neutralises(neutralises):
+        if not neutralises:
+            return "(none)"
+        if isinstance(neutralises, list):
+            return ", ".join(f"<a href='#bug-{nid}'>{nid}</a>" for nid in neutralises)
+        return f"<a href='#bug-{neutralises}'>{neutralises}</a>"
+
     def render_bug_report(all_versions):
         """Render flat list of all active bugs, with [new] for introduced bugs and fixed list."""
         html = ""
@@ -288,8 +308,12 @@ def export_html(data, filename, title):
                 for b in node["since_predecessor"].get("introduced", []):
                     all_introduced_ids.add(b["id"])
                 for f in node["since_predecessor"].get("fixes", []):
-                    if f.get("neutralises"):
-                        all_fixed_ids.add(f["neutralises"])
+                    neuts = f.get("neutralises") or []
+                    if not isinstance(neuts, list):
+                        neuts = [neuts]
+                    for n in neuts:
+                        if n:
+                            all_fixed_ids.add(n)
 
         # Render active bugs grouped by element (with linked element ids)
         if bugs_by_version:
@@ -425,8 +449,10 @@ def export_html(data, filename, title):
         if fixes:
             html_entry += "<div>Bugs fixed:<ul>"
             for f in fixes:
-                neutral = f.get('neutralises')
-                neutral_link = f"<a href='#bug-{neutral}'>{neutral}</a>" if neutral else "(none)"
+                neuts = f.get('neutralises') or []
+                if not isinstance(neuts, list):
+                    neuts = [neuts]
+                neutral_link = render_neutralises(neuts)
                 # Find source/version path for the fix (include current node for current-element section)
                 path = find_fix_path(node, f['id'])
                 if path:
@@ -464,8 +490,10 @@ def export_html(data, filename, title):
             if c_fixes:
                 html_entry += "<div>Bugs fixed:<ul>"
                 for f in c_fixes:
-                    neutral = f.get('neutralises')
-                    neutral_link = f"<a href='#bug-{neutral}'>{neutral}</a>" if neutral else "(none)"
+                    neuts = f.get('neutralises') or []
+                    if not isinstance(neuts, list):
+                        neuts = [neuts]
+                    neutral_link = render_neutralises(neuts)
                     # For child elements, build path from current node to fix and skip current node in display
                     path = find_fix_path(node, f['id'])
                     if path and len(path) > 1:
@@ -496,19 +524,38 @@ def export_html(data, filename, title):
         if sp and sp.get("fixes"):
             for f in sp.get("fixes", []):
                 all_fixes[f["id"]] = f
-                if f.get("neutralises"):
-                    bug_to_fixes[f.get("neutralises")].append(f["id"])
-                    # ensure neutralised bug appears in all_bugs (even if not active)
-                    if f.get("neutralises") not in all_bugs:
-                        row = conn.execute("SELECT id, title, description FROM tickets WHERE id = ?", (f.get("neutralises"),)).fetchone()
-                        if row:
-                            all_bugs[row["id"]] = {"title": row["title"], "description": row["description"], "versions": []}
+                neuts = f.get("neutralises") or []
+                if not isinstance(neuts, list):
+                    neuts = [neuts]
+                for n in neuts:
+                    if n:
+                        bug_to_fixes[n].append(f["id"])
+                        # ensure neutralised bug appears in all_bugs (even if not active)
+                        if n not in all_bugs:
+                            row = conn.execute("SELECT id, title, description FROM tickets WHERE id = ?", (n,)).fetchone()
+                            if row:
+                                all_bugs[row["id"]] = {"title": row["title"], "description": row["description"], "versions": []}
+
+    # Build ticket -> versions mapping for current containment DAG
+    ticket_to_versions = defaultdict(list)
+    for row in conn.execute("SELECT ticket_id, version_id FROM ticket_versions"):
+        if row["version_id"] in all_versions:
+            ticket_to_versions[row["ticket_id"]].append(row["version_id"])
 
     # Render bug details section (include bugs that were neutralised by fixes)
     bug_details_html = "<ul>"
     for bug_id in sorted(all_bugs.keys()):
         bug_info = all_bugs[bug_id]
         bug_details_html += f"<li id='bug-{bug_id}'>{bug_id}<div>Title: {bug_info.get('title','')}</div><div>Description: {bug_info.get('description','')}</div>"
+        # Related element versions (within current containment DAG)
+        related_versions = ticket_to_versions.get(bug_id, [])
+        if related_versions:
+            parts = []
+            for vid in related_versions:
+                disp = get_element_display_name(conn, vid)
+                disp = disp.replace(f"(Id: {vid})", f"(Id: <a href='#{vid}'>{vid}</a>)")
+                parts.append(disp)
+            bug_details_html += f"<div>Related element versions: {', '.join(parts)}</div>"
         if bug_to_fixes.get(bug_id):
             fixes_links = ", ".join(f"<a href='#fix-{fid}'>{fid}</a>" for fid in sorted(bug_to_fixes[bug_id]))
             bug_details_html += f"<div>Fixed by: {fixes_links}</div>"
@@ -519,9 +566,23 @@ def export_html(data, filename, title):
     fix_details_html = "<ul>"
     for fix_id in sorted(all_fixes.keys()):
         fix = all_fixes[fix_id]
-        neutralises = fix.get('neutralises')
-        neutralises_link = f"<a href='#bug-{neutralises}'>{neutralises}</a>" if neutralises else "(none)"
-        fix_details_html += f"<li id='fix-{fix_id}'>{fix_id}<div>Title: {fix.get('title','')}</div><div>Description: {fix.get('description','')}</div><div>Neutralises: {neutralises_link}</div></li>"
+        neuts = fix.get('neutralises') or []
+        if not isinstance(neuts, list):
+            neuts = [neuts]
+        neutralises_link = render_neutralises(neuts)
+
+        # Related element versions for this fix (within current containment DAG)
+        related_versions = ticket_to_versions.get(fix_id, [])
+        related_html = ""
+        if related_versions:
+            parts = []
+            for vid in related_versions:
+                disp = get_element_display_name(conn, vid)
+                disp = disp.replace(f"(Id: {vid})", f"(Id: <a href='#{vid}'>{vid}</a>)")
+                parts.append(disp)
+            related_html = f"<div>Related element versions: {', '.join(parts)}</div>"
+
+        fix_details_html += f"<li id='fix-{fix_id}'>{fix_id}<div>Title: {fix.get('title','')}</div><div>Description: {fix.get('description','')}</div><div>Neutralises: {neutralises_link}</div>{related_html}</li>"
     fix_details_html += "</ul>"
 
     html = f"""
