@@ -92,6 +92,19 @@ def get_element_info(conn, version_id):
         return row["element_id"], row["version"]
     return None, None
 
+
+def get_element_display_name(conn, version_id):
+    """Get formatted display: Name Version - Variant (Id: version_id)."""
+    row = conn.execute("""
+        SELECT ev.id, ev.version, ev.variant, e.name
+        FROM element_versions ev
+        JOIN elements e ON ev.element_id = e.id
+        WHERE ev.id = ?
+    """, (version_id,)).fetchone()
+    if row:
+        return f"{row['name']} {row['version']} - {row['variant']}\n    Id: {row['id']}"
+    return version_id
+
 def build_tree(current_root, predecessor_root=None):
     conn = get_connection()
     children = containment_tree(conn, current_root)
@@ -163,6 +176,7 @@ def export_json(data, filename):
     Path(filename).write_text(json.dumps(data, indent=2))
 
 def export_html(data, filename, title):
+    conn = get_connection()
     all_versions = {}  # version_id -> node for collecting all versions
 
     def collect_all_versions(node):
@@ -175,7 +189,8 @@ def export_html(data, filename, title):
 
     def render_bom(node):
         """Render BOM (hierarchy only, no details)."""
-        html = f"<li><strong>{node['version']}</strong>"
+        display = get_element_display_name(conn, node["version"])
+        html = f"<li>{display}"
         if node["children"]:
             html += "<ul>"
             for c in node["children"]:
@@ -185,36 +200,59 @@ def export_html(data, filename, title):
         return html
 
     def render_bug_report(all_versions):
-        """Render flat list of all active bugs across all versions."""
+        """Render flat list of all active bugs, with [new] for introduced bugs and fixed list."""
         html = ""
+        
+        # Collect bugs by version, track which are new and which are fixed
         bugs_by_version = {}
-        for version_id in sorted(all_versions.keys()):
+        all_introduced_ids = set()
+        all_fixed_ids = set()
+        
+        for version_id in all_versions.keys():
             node = all_versions[version_id]
             if node.get("active_bugs"):
                 bugs_by_version[version_id] = node["active_bugs"]
+            # Collect introduced and fixed bugs
+            if node.get("since_predecessor"):
+                for b in node["since_predecessor"].get("introduced", []):
+                    all_introduced_ids.add(b["id"])
+                for f in node["since_predecessor"].get("fixes", []):
+                    all_fixed_ids.add(f["neutralises"])
         
+        # Render active bugs with [new] decorator
         if bugs_by_version:
             for version_id in sorted(bugs_by_version.keys()):
                 bugs = bugs_by_version[version_id]
-                html += f"<li><strong>{version_id}</strong><ul>"
+                display = get_element_display_name(conn, version_id)
+                html += f"<li>{display}<ul>"
                 for bug in bugs:
+                    is_new = " [new]" if bug["id"] in all_introduced_ids else ""
                     desc = bug.get("description") or ""
-                    html += f"<li>{bug['id']}: {bug['title']} - {desc}</li>"
+                    html += f"<li>{bug['id']}: {bug['title']} - {desc}{is_new}</li>"
                 html += "</ul></li>"
         else:
             html = "<li>(no active bugs)</li>"
+        
+        # Render fixed bugs list if any
+        if all_fixed_ids:
+            html += "<li><strong>Fixed since predecessor</strong><ul>"
+            for bug_id in sorted(all_fixed_ids):
+                html += f"<li>{bug_id}</li>"
+            html += "</ul></li>"
+        
         return html
 
     def render_detailed_element_version(node):
         """Render details for a single element version."""
-        html = f"<li id='{node['version']}'><strong>{node['version']}</strong> (bugs: {node['summary']['bugs']})"
+        display = get_element_display_name(conn, node["version"])
+        html = f"<li id='{node['version']}'>{display} (bugs: {node['summary']['bugs']})"
         
         # Predecessor and changes
         if "version_not_updated" in node and node.get("version_not_updated"):
             html += "<div style='margin-left:8px'><em>Hint:</em> Version was not updated.</div>"
         elif "predecessor_version" in node:
-            pred = node["predecessor_version"] or "(none)"
-            html += f"<div style='margin-left:8px'><em>Predecessor:</em> {pred}</div>"
+            pred_display = get_element_display_name(conn, node["predecessor_version"]) if node["predecessor_version"] else "(none)"
+            html += f"<div style='margin-left:8px'><em>Predecessor:</em><br/>{pred_display}</div>"
             if node.get("since_predecessor"):
                 ch = node["since_predecessor"]
                 html += "<div style='margin-left:8px'><em>Since predecessor:</em>"
@@ -276,3 +314,4 @@ def export_html(data, filename, title):
     </html>
     """
     Path(filename).write_text(html)
+    conn.close()
