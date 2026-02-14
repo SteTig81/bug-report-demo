@@ -102,7 +102,7 @@ def get_element_display_name(conn, version_id):
         WHERE ev.id = ?
     """, (version_id,)).fetchone()
     if row:
-        return f"{row['name']} {row['version']} - {row['variant']}\n    Id: {row['id']}"
+        return f"{row['name']} {row['version']} - {row['variant']} (Id: {row['id']})"
     return version_id
 
 def build_tree(current_root, predecessor_root=None):
@@ -178,19 +178,44 @@ def export_json(data, filename):
 def export_html(data, filename, title):
     conn = get_connection()
     all_versions = {}  # version_id -> node for collecting all versions
+    all_bugs = {}  # bug_id -> {"title", "description", "versions": [version_ids]}
 
     def collect_all_versions(node):
-        """Traverse tree and collect all unique versions."""
+        """Traverse tree and collect all unique versions and bugs."""
         version_id = node["version"]
         if version_id not in all_versions:
             all_versions[version_id] = node
+            # Collect active bugs from this version
+            for bug in node.get("active_bugs", []):
+                if bug["id"] not in all_bugs:
+                    all_bugs[bug["id"]] = {"title": bug["title"], "description": bug.get("description", ""), "versions": []}
+                if version_id not in all_bugs[bug["id"]]["versions"]:
+                    all_bugs[bug["id"]]["versions"].append(version_id)
         for child in node.get("children", []):
             collect_all_versions(child)
+    
+    def collect_aggregated_bugs(node):
+        """Collect all active bugs from this node and all descendant nodes, deduped by bug_id."""
+        aggregated = {}
+        # Add bugs from this node
+        for bug in node.get("active_bugs", []):
+            if bug["id"] not in aggregated:
+                aggregated[bug["id"]] = bug
+        # Add bugs from children
+        for child in node.get("children", []):
+            child_bugs = collect_aggregated_bugs(child)
+            for bug_id, bug_info in child_bugs.items():
+                if bug_id not in aggregated:
+                    aggregated[bug_id] = bug_info
+        return aggregated
 
     def render_bom(node):
         """Render BOM (hierarchy only, no details)."""
-        display = get_element_display_name(conn, node["version"])
-        html = f"<li>{display}"
+        version_id = node["version"]
+        display = get_element_display_name(conn, version_id)
+        # Hyperlink the element ID
+        display_with_link = display.replace(f"(Id: {version_id})", f"(Id: <a href='#{version_id}'>{version_id}</a>)")
+        html = f"<li>{display_with_link}"
         if node["children"]:
             html += "<ul>"
             for c in node["children"]:
@@ -244,43 +269,39 @@ def export_html(data, filename, title):
 
     def render_detailed_element_version(node):
         """Render details for a single element version."""
-        display = get_element_display_name(conn, node["version"])
-        html = f"<li id='{node['version']}'>{display} (bugs: {node['summary']['bugs']})"
+        version_id = node["version"]
+        display = get_element_display_name(conn, version_id)
+        html = f"<li id='{version_id}'>{display}"
         
         # Predecessor and changes
         if "version_not_updated" in node and node.get("version_not_updated"):
             html += "<div style='margin-left:8px'><em>Hint:</em> Version was not updated.</div>"
         elif "predecessor_version" in node:
-            pred_display = get_element_display_name(conn, node["predecessor_version"]) if node["predecessor_version"] else "(none)"
-            html += f"<div style='margin-left:8px'><em>Predecessor:</em><br/>{pred_display}</div>"
+            if node["predecessor_version"]:
+                pred_display = get_element_display_name(conn, node["predecessor_version"])
+                html += f"<div style='margin-left:8px'><em>Predecessor:</em><br/>{pred_display}</div>"
+            else:
+                html += "<div style='margin-left:8px'><em>Predecessor:</em><br/>(none)</div>"
             if node.get("since_predecessor"):
                 ch = node["since_predecessor"]
                 html += "<div style='margin-left:8px'><em>Since predecessor:</em>"
                 html += "<div><strong>Introduced:</strong><ul>"
                 if ch.get("introduced"):
                     for b in ch["introduced"]:
-                        html += f"<li>{b['id']}: {b['title']} - {b.get('description','')}</li>"
+                        html += f"<li><a href='#bug-{b['id']}'>{b['id']}</a>: {b['title']} - {b.get('description','')}</li>"
                 else:
                     html += "<li>(none)</li>"
                 html += "</ul></div>"
                 html += "<div><strong>Fixes:</strong><ul>"
                 if ch.get("fixes"):
                     for f in ch["fixes"]:
-                        html += f"<li>{f['id']} (neutralises {f.get('neutralises')}): {f['title']}</li>"
+                        neutralises_link = f"<a href='#bug-{f.get('neutralises')}'>{f.get('neutralises')}</a>"
+                        html += f"<li><a href='#bug-{f['id']}'>{f['id']}</a> (neutralises {neutralises_link}): {f['title']}</li>"
                 else:
                     html += "<li>(none)</li>"
                 html += "</ul></div>"
                 html += "</div>"
         
-        # Active bugs
-        if node.get("active_bugs"):
-            html += "<div style='margin-left:8px'><strong>Active bugs:</strong><ul>"
-            for bug in node["active_bugs"]:
-                desc = bug.get("description") or ""
-                html += f"<li>{bug['id']}: {bug['title']} - {desc}</li>"
-            html += "</ul></div>"
-        
-        html += "</li>"
         return html
 
     # Collect all versions
@@ -292,8 +313,68 @@ def export_html(data, filename, title):
     
     detailed_html = "<ul>"
     for version_id in sorted(all_versions.keys()):
-        detailed_html += render_detailed_element_version(all_versions[version_id])
+        node = all_versions[version_id]
+        html_entry = render_detailed_element_version(node)
+        # Collect bugs: direct bugs in this element vs inherited from children
+        direct_bugs = {}
+        for bug in node.get("active_bugs", []):
+            if bug["id"] not in direct_bugs:
+                direct_bugs[bug["id"]] = bug
+        
+        inherited_bugs = {}
+        for child in node.get("children", []):
+            child_bugs = collect_aggregated_bugs(child)
+            for bug_id, bug_info in child_bugs.items():
+                if bug_id not in inherited_bugs and bug_id not in direct_bugs:
+                    inherited_bugs[bug_id] = bug_info
+        
+        total_bugs = len(direct_bugs) + len(inherited_bugs)
+        
+        if total_bugs > 0:
+            html_entry += "<div style='margin-left:8px'>"
+            
+            # Segment 1: Direct bugs in this element
+            if direct_bugs:
+                html_entry += "<div><strong>Active bugs in this element:</strong><ul>"
+                for bug in sorted(direct_bugs.values(), key=lambda b: b.get("id", "")):
+                    html_entry += f"<li><a href='#bug-{bug['id']}'>{bug['id']}</a> | {bug['title']}</li>"
+                html_entry += "</ul></div>"
+            
+            # Segment 2: Inherited bugs from children
+            if inherited_bugs:
+                html_entry += "<div><strong>Active bugs in child elements:</strong><ul>"
+                for bug in sorted(inherited_bugs.values(), key=lambda b: b.get("id", "")):
+                    # Find which version this bug comes from for display
+                    bug_source_version_id = None
+                    for v_id in all_versions:
+                        for active_bug in all_versions[v_id].get("active_bugs", []):
+                            if active_bug["id"] == bug["id"]:
+                                bug_source_version_id = v_id
+                                break
+                        if bug_source_version_id:
+                            break
+                    if bug_source_version_id:
+                        bug_source_display = get_element_display_name(conn, bug_source_version_id)
+                        bug_source_display = bug_source_display.replace(f"(Id: {bug_source_version_id})", f"(Id: <a href='#{bug_source_version_id}'>{bug_source_version_id}</a>)")
+                        html_entry += f"<li><a href='#bug-{bug['id']}'>{bug['id']}</a> | {bug_source_display} | {bug['title']}</li>"
+                    else:
+                        html_entry += f"<li><a href='#bug-{bug['id']}'>{bug['id']}</a> | {bug['title']}</li>"
+                html_entry += "</ul></div>"
+            
+            # Segment 3: Total count
+            html_entry += f"<div><strong>Total aggregated: {total_bugs} active bug(s)</strong></div>"
+            html_entry += "</div>"
+        
+        html_entry += "</li>"  # Close the li tag
+        detailed_html += html_entry
     detailed_html += "</ul>"
+    
+    # Render bug details section
+    bug_details_html = "<ul>"
+    for bug_id in sorted(all_bugs.keys()):
+        bug_info = all_bugs[bug_id]
+        bug_details_html += f"<li id='bug-{bug_id}'><strong>{bug_id}</strong><div>Title: {bug_info['title']}</div><div>Description: {bug_info['description']}</div></li>"
+    bug_details_html += "</ul>"
 
     html = f"""
     <html>
@@ -309,6 +390,9 @@ def export_html(data, filename, title):
     
     <h2>3. Detailed Element Version Report</h2>
     {detailed_html}
+    
+    <h2>4. Bug Details</h2>
+    {bug_details_html}
     
     </body>
     </html>
