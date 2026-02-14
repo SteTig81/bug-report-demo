@@ -152,6 +152,7 @@ def build_tree(current_root, predecessor_root=None):
             pred_ver, changes = compute_interval_for_element(node)
             node_entry["predecessor_version"] = pred_ver
             node_entry["since_predecessor"] = changes
+            node_entry["version_not_updated"] = (pred_ver == node)
         return node_entry
 
     tree = build(current_root)
@@ -166,31 +167,33 @@ def export_html(data, filename, title):
         html = f"<li><strong>{node['version']}</strong> (bugs: {node['summary']['bugs']})"
 
         # Predecessor mapping for this element (if computed)
-        if "predecessor_version" in node:
+        if "version_not_updated" in node and node.get("version_not_updated"):
+            html += "<div style='margin-left:8px'><em>Hint:</em> Version was not updated.</div>"
+        elif "predecessor_version" in node:
             pred = node["predecessor_version"] or "(none)"
             html += f"<div style='margin-left:8px'><em>Predecessor:</em> {pred}</div>"
 
-        # Changes since predecessor for this element
-        if node.get("since_predecessor"):
-            ch = node["since_predecessor"]
-            html += "<div style='margin-left:8px'><em>Since predecessor:</em>"
-            # Introduced bugs
-            html += "<div><strong>Introduced:</strong><ul>"
-            if ch.get("introduced"):
-                for b in ch["introduced"]:
-                    html += f"<li>{b['id']}: {b['title']} - {b.get('description','')}</li>"
-            else:
-                html += "<li>(none)</li>"
-            html += "</ul></div>"
-            # Fixes
-            html += "<div><strong>Fixes:</strong><ul>"
-            if ch.get("fixes"):
-                for f in ch["fixes"]:
-                    html += f"<li>{f['id']} (neutralises {f.get('neutralises')}): {f['title']}</li>"
-            else:
-                html += "<li>(none)</li>"
-            html += "</ul></div>"
-            html += "</div>"
+            # Changes since predecessor for this element
+            if node.get("since_predecessor"):
+                ch = node["since_predecessor"]
+                html += "<div style='margin-left:8px'><em>Since predecessor:</em>"
+                # Introduced bugs
+                html += "<div><strong>Introduced:</strong><ul>"
+                if ch.get("introduced"):
+                    for b in ch["introduced"]:
+                        html += f"<li>{b['id']}: {b['title']} - {b.get('description','')}</li>"
+                else:
+                    html += "<li>(none)</li>"
+                html += "</ul></div>"
+                # Fixes
+                html += "<div><strong>Fixes:</strong><ul>"
+                if ch.get("fixes"):
+                    for f in ch["fixes"]:
+                        html += f"<li>{f['id']} (neutralises {f.get('neutralises')}): {f['title']}</li>"
+                else:
+                    html += "<li>(none)</li>"
+                html += "</ul></div>"
+                html += "</div>"
 
         # Active bug details (current active bugs on this version)
         if node.get("active_bugs"):
