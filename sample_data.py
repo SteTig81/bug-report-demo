@@ -51,12 +51,21 @@ def create_sample_data():
     )
 
     tickets = [
-        ("BUG1", "bug", "Memory corruption", "", None),
-        ("BUG2", "bug", "Utility crash", "", None),
-        ("FIX1", "bugfix", "Fix memory corruption", "", "BUG1")
+        ("BUG1", "bug", "Memory corruption", "After 5 minutes there is a memory leak.", None),
+        ("BUG2", "bug", "Utility crash", "When clicking Print button the application crashes.", None),
+        ("FIX1", "bugfix", "Fix memory corruption", "Added proper free() calls.", "BUG1")
     ]
+    # Use an UPSERT so re-running the sample generator updates existing rows
     cur.executemany(
-        "INSERT OR IGNORE INTO tickets VALUES (?,?,?,?,?)",
+        """
+        INSERT INTO tickets(id,type,title,description,fixes_ticket_id)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            type=excluded.type,
+            title=excluded.title,
+            description=excluded.description,
+            fixes_ticket_id=excluded.fixes_ticket_id;
+        """,
         tickets
     )
 
