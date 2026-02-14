@@ -163,21 +163,61 @@ def export_json(data, filename):
     Path(filename).write_text(json.dumps(data, indent=2))
 
 def export_html(data, filename, title):
-    def render(node):
-        html = f"<li><strong>{node['version']}</strong> (bugs: {node['summary']['bugs']})"
+    all_versions = {}  # version_id -> node for collecting all versions
 
-        # Predecessor mapping for this element (if computed)
+    def collect_all_versions(node):
+        """Traverse tree and collect all unique versions."""
+        version_id = node["version"]
+        if version_id not in all_versions:
+            all_versions[version_id] = node
+        for child in node.get("children", []):
+            collect_all_versions(child)
+
+    def render_bom(node):
+        """Render BOM (hierarchy only, no details)."""
+        html = f"<li><strong>{node['version']}</strong>"
+        if node["children"]:
+            html += "<ul>"
+            for c in node["children"]:
+                html += render_bom(c)
+            html += "</ul>"
+        html += "</li>"
+        return html
+
+    def render_bug_report(all_versions):
+        """Render flat list of all active bugs across all versions."""
+        html = ""
+        bugs_by_version = {}
+        for version_id in sorted(all_versions.keys()):
+            node = all_versions[version_id]
+            if node.get("active_bugs"):
+                bugs_by_version[version_id] = node["active_bugs"]
+        
+        if bugs_by_version:
+            for version_id in sorted(bugs_by_version.keys()):
+                bugs = bugs_by_version[version_id]
+                html += f"<li><strong>{version_id}</strong><ul>"
+                for bug in bugs:
+                    desc = bug.get("description") or ""
+                    html += f"<li>{bug['id']}: {bug['title']} - {desc}</li>"
+                html += "</ul></li>"
+        else:
+            html = "<li>(no active bugs)</li>"
+        return html
+
+    def render_detailed_element_version(node):
+        """Render details for a single element version."""
+        html = f"<li id='{node['version']}'><strong>{node['version']}</strong> (bugs: {node['summary']['bugs']})"
+        
+        # Predecessor and changes
         if "version_not_updated" in node and node.get("version_not_updated"):
             html += "<div style='margin-left:8px'><em>Hint:</em> Version was not updated.</div>"
         elif "predecessor_version" in node:
             pred = node["predecessor_version"] or "(none)"
             html += f"<div style='margin-left:8px'><em>Predecessor:</em> {pred}</div>"
-
-            # Changes since predecessor for this element
             if node.get("since_predecessor"):
                 ch = node["since_predecessor"]
                 html += "<div style='margin-left:8px'><em>Since predecessor:</em>"
-                # Introduced bugs
                 html += "<div><strong>Introduced:</strong><ul>"
                 if ch.get("introduced"):
                     for b in ch["introduced"]:
@@ -185,7 +225,6 @@ def export_html(data, filename, title):
                 else:
                     html += "<li>(none)</li>"
                 html += "</ul></div>"
-                # Fixes
                 html += "<div><strong>Fixes:</strong><ul>"
                 if ch.get("fixes"):
                     for f in ch["fixes"]:
@@ -194,30 +233,45 @@ def export_html(data, filename, title):
                     html += "<li>(none)</li>"
                 html += "</ul></div>"
                 html += "</div>"
-
-        # Active bug details (current active bugs on this version)
+        
+        # Active bugs
         if node.get("active_bugs"):
             html += "<div style='margin-left:8px'><strong>Active bugs:</strong><ul>"
             for bug in node["active_bugs"]:
                 desc = bug.get("description") or ""
                 html += f"<li>{bug['id']}: {bug['title']} - {desc}</li>"
             html += "</ul></div>"
-
-        # Render child nodes
-        if node["children"]:
-            html += "<ul>"
-            for c in node["children"]:
-                html += render(c)
-            html += "</ul>"
+        
         html += "</li>"
         return html
+
+    # Collect all versions
+    collect_all_versions(data)
+
+    # Render sections
+    bom_html = render_bom(data)
+    bug_report_html = render_bug_report(all_versions)
+    
+    detailed_html = "<ul>"
+    for version_id in sorted(all_versions.keys()):
+        detailed_html += render_detailed_element_version(all_versions[version_id])
+    detailed_html += "</ul>"
 
     html = f"""
     <html>
     <head><title>{title}</title></head>
     <body>
     <h1>{title}</h1>
-    <ul>{render(data)}</ul>
+    
+    <h2>1. Bill of Materials (BOM)</h2>
+    <ul>{bom_html}</ul>
+    
+    <h2>2. Bug Report</h2>
+    <ul>{bug_report_html}</ul>
+    
+    <h2>3. Detailed Element Version Report</h2>
+    {detailed_html}
+    
     </body>
     </html>
     """
