@@ -19,21 +19,25 @@ def history_closure(conn, version_id):
 
 def active_bugs(conn, version_id):
     history = history_closure(conn, version_id)
-    introduced = set()
-    fixes = {}
+    introduced = {}
+    fixes = set()
 
     for row in conn.execute("""
-        SELECT t.id, t.type, t.fixes_ticket_id, tv.version_id
+        SELECT t.id, t.type, t.fixes_ticket_id, tv.version_id, t.title, t.description
         FROM tickets t
         JOIN ticket_versions tv ON t.id = tv.ticket_id
     """):
         if row["version_id"] in history:
             if row["type"] == "bug":
-                introduced.add(row["id"])
-            elif row["type"] == "bugfix":
-                fixes[row["fixes_ticket_id"]] = True
+                introduced[row["id"]] = {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "description": row["description"]
+                }
+            elif row["type"] == "bugfix" and row["fixes_ticket_id"]:
+                fixes.add(row["fixes_ticket_id"])
 
-    return [b for b in introduced if b not in fixes]
+    return [b for i, b in introduced.items() if i not in fixes]
 
 def containment_tree(conn, root):
     sql = """
@@ -81,6 +85,15 @@ def export_json(data, filename):
 def export_html(data, filename, title):
     def render(node):
         html = f"<li>{node['version']} (bugs: {node['summary']['bugs']})"
+        # Render active bug details
+        if node.get("active_bugs"):
+            html += "<ul>"
+            for bug in node["active_bugs"]:
+                desc = bug.get("description") or ""
+                html += f"<li><strong>{bug['id']}</strong>: {bug['title']} - {desc}</li>"
+            html += "</ul>"
+
+        # Render child nodes
         if node["children"]:
             html += "<ul>"
             for c in node["children"]:
