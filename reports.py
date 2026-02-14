@@ -28,7 +28,7 @@ def active_bugs(conn, version_id):
     fixes = set()
 
     for row in conn.execute("""
-        SELECT t.id, t.type, t.fixes_ticket_id, tv.version_id, t.title, t.description
+        SELECT t.id, t.type, tv.version_id, t.title, t.description
         FROM tickets t
         JOIN ticket_versions tv ON t.id = tv.ticket_id
     """):
@@ -49,9 +49,7 @@ def active_bugs(conn, version_id):
                     for nid in nrows:
                         fixes.add(nid)
                         logger.debug("active_bugs: version=%s bugfix=%s neutralises=%s", version_id, fix_id, nid)
-                elif row.get("fixes_ticket_id"):
-                    fixes.add(row["fixes_ticket_id"])
-                    logger.debug("active_bugs: version=%s bugfix=%s neutralises=%s (legacy)", version_id, fix_id, row["fixes_ticket_id"])
+                # legacy single-column fallback removed; neutralisations are read from fix_neutralises
 
     neutralised = [i for i in introduced.keys() if i in fixes]
     if neutralised:
@@ -145,7 +143,7 @@ def build_tree(current_root, predecessor_root=None):
             if interval_nodes:
                 preds = list(interval_nodes)
                 placeholders = ",".join("?" for _ in preds)
-                sql = f"SELECT t.id, t.type, t.fixes_ticket_id, tv.version_id, t.title, t.description FROM tickets t JOIN ticket_versions tv ON t.id = tv.ticket_id WHERE tv.version_id IN ({placeholders})"
+                sql = f"SELECT t.id, t.type, tv.version_id, t.title, t.description FROM tickets t JOIN ticket_versions tv ON t.id = tv.ticket_id WHERE tv.version_id IN ({placeholders})"
                 for row in conn.execute(sql, preds):
                     if row["type"] == "bug":
                         introduced.append({"id": row["id"], "title": row["title"], "description": row["description"]})
@@ -153,7 +151,7 @@ def build_tree(current_root, predecessor_root=None):
                         # gather neutralises list from fix_neutralises table (fallback to legacy column)
                         fix_id = row["id"]
                         nrows = [r["bug_id"] for r in conn.execute("SELECT bug_id FROM fix_neutralises WHERE fix_id = ?", (fix_id,))]
-                        neutralises = nrows if nrows else ([row["fixes_ticket_id"]] if row.get("fixes_ticket_id") else [])
+                        neutralises = nrows
                         fixes.append({"id": row["id"], "title": row["title"], "description": row["description"], "neutralises": neutralises})
 
         logger.debug("compute_interval_for_element: node=%s pred_version=%s introduced=%d fixes=%d", node, pred_version, len(introduced), len(fixes))

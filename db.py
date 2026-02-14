@@ -50,9 +50,7 @@ def initialize_database():
         id TEXT PRIMARY KEY,
         type TEXT CHECK(type IN ('bug','bugfix')) NOT NULL,
         title TEXT NOT NULL,
-        description TEXT,
-        fixes_ticket_id TEXT,
-        FOREIGN KEY (fixes_ticket_id) REFERENCES tickets(id)
+        description TEXT
     );
 
     CREATE TABLE IF NOT EXISTS fix_neutralises (
