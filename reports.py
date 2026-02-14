@@ -222,6 +222,18 @@ def export_html(data, filename, title):
                 return [node["version"]] + path
         return None
 
+    def find_fix_path(node, fix_id):
+        """Find the path from node down to where fix_id exists (in since_predecessor.fix list)."""
+        sp = node.get("since_predecessor") or {}
+        for f in sp.get("fixes", []):
+            if f.get("id") == fix_id:
+                return [node["version"]]
+        for child in node.get("children", []):
+            path = find_fix_path(child, fix_id)
+            if path:
+                return [node["version"]] + path
+        return None
+
     def collect_changes_in_descendants(node):
         """Collect introduced/fixes from all descendant nodes (not including node itself)."""
         introduced = {}
@@ -415,7 +427,19 @@ def export_html(data, filename, title):
             for f in fixes:
                 neutral = f.get('neutralises')
                 neutral_link = f"<a href='#bug-{neutral}'>{neutral}</a>" if neutral else "(none)"
-                html_entry += f"<li><a href='#fix-{f['id']}'>{f['id']}</a> (neutralises {neutral_link}): {f.get('title','')}</li>"
+                # Find source/version path for the fix (include current node for current-element section)
+                path = find_fix_path(node, f['id'])
+                if path:
+                    # For current-element changes show the node itself (path[0])
+                    path_parts = []
+                    for vid in path:
+                        elem_display = get_element_display_name(conn, vid)
+                        elem_display = elem_display.replace(f"(Id: {vid})", f"(Id: <a href='#{vid}'>{vid}</a>)")
+                        path_parts.append(elem_display)
+                    path_display = " -> ".join(path_parts)
+                    html_entry += f"<li><a href='#fix-{f['id']}'>{f['id']}</a> (neutralises {neutral_link}) | {path_display} | {f.get('title','')}</li>"
+                else:
+                    html_entry += f"<li><a href='#fix-{f['id']}'>{f['id']}</a> (neutralises {neutral_link}) | {f.get('title','')}</li>"
             html_entry += "</ul></div>"
         else:
             html_entry += "<div>Bugs fixed: (none)</div>"
@@ -442,7 +466,18 @@ def export_html(data, filename, title):
                 for f in c_fixes:
                     neutral = f.get('neutralises')
                     neutral_link = f"<a href='#bug-{neutral}'>{neutral}</a>" if neutral else "(none)"
-                    html_entry += f"<li><a href='#fix-{f['id']}'>{f['id']}</a> (neutralises {neutral_link}): {f.get('title','')}</li>"
+                    # For child elements, build path from current node to fix and skip current node in display
+                    path = find_fix_path(node, f['id'])
+                    if path and len(path) > 1:
+                        path_display_parts = []
+                        for vid in path[1:]:
+                            elem_display = get_element_display_name(conn, vid)
+                            elem_display = elem_display.replace(f"(Id: {vid})", f"(Id: <a href='#{vid}'>{vid}</a>)")
+                            path_display_parts.append(elem_display)
+                        path_display = " -> ".join(path_display_parts)
+                        html_entry += f"<li><a href='#fix-{f['id']}'>{f['id']}</a> (neutralises {neutral_link}) | {path_display} | {f.get('title','')}</li>"
+                    else:
+                        html_entry += f"<li><a href='#fix-{f['id']}'>{f['id']}</a> (neutralises {neutral_link}) | {f.get('title','')}</li>"
                 html_entry += "</ul></div>"
             else:
                 html_entry += "<div>Bugs fixed: (none)</div>"
