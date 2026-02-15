@@ -16,12 +16,14 @@ def create_sample_data():
     cur.executemany("INSERT OR IGNORE INTO elements VALUES (?,?)", elements)
 
     versions = [
-        ("APP_v1", "E_APP", 1, "A"),
-        ("APP_v2", "E_APP", 2, "A"),
-        ("LIB_v1", "E_LIB", 1, "A"),
-        ("LIB_v2", "E_LIB", 2, "A"),
-        ("LIB_v3", "E_LIB", 3, "A"),
-        ("UTIL_v1", "E_UTIL", 1, "A")
+        ("APP_v1", "E_APP", "1", "A"),
+        ("APP_v2", "E_APP", "2", "A"),
+        ("APP_1_0_0_B", "E_APP", "1.0.0", "B"),
+        ("LIB_v1", "E_LIB", "1", "A"),
+        ("LIB_v2", "E_LIB", "2", "A"),
+        ("LIB_v3", "E_LIB", "3", "A"),
+        ("LIB_v2_B", "E_LIB", "2", "B"),
+        ("UTIL_v1", "E_UTIL", "1", "A")
     ]
     cur.executemany(
         "INSERT OR IGNORE INTO element_versions(id, element_id, version, variant) VALUES (?,?,?,?)",
@@ -30,7 +32,9 @@ def create_sample_data():
 
     history = [
         ("APP_v2", "APP_v1"),
+        ("APP_1_0_0_B", "APP_v2"),
         ("LIB_v2", "LIB_v1"),
+        ("LIB_v2_B", "LIB_v2"),
         ("LIB_v3", "LIB_v2")
     ]
     cur.executemany(
@@ -48,6 +52,16 @@ def create_sample_data():
     cur.executemany(
         "INSERT OR IGNORE INTO element_version_dependencies VALUES (?,?)",
         deps
+    )
+
+    # Add dependencies for the new Application variant: inherit APP_v2 but replace library with LIB_v2_B
+    new_deps = [
+        ("APP_1_0_0_B", "LIB_v2_B"),
+        ("APP_1_0_0_B", "UTIL_v1")
+    ]
+    cur.executemany(
+        "INSERT OR IGNORE INTO element_version_dependencies VALUES (?,?)",
+        new_deps
     )
 
     tickets = [
@@ -77,6 +91,8 @@ def create_sample_data():
         "INSERT OR IGNORE INTO ticket_versions VALUES (?,?)",
         ticket_versions
     )
+
+    # No explicit fix ticket: BUG2 will be fixed implicitly by removing the dependency in the DAG
 
     # Map fixes to the bugs they neutralise (support multiple neutralisations)
     fix_neutralises = [

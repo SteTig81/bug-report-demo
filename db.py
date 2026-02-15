@@ -23,7 +23,7 @@ def initialize_database():
     CREATE TABLE IF NOT EXISTS element_versions (
         id TEXT PRIMARY KEY,
         element_id TEXT NOT NULL,
-        version INTEGER NOT NULL,
+        version TEXT NOT NULL,
         variant TEXT NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (element_id, version, variant),

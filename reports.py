@@ -41,15 +41,12 @@ def active_bugs(conn, version_id):
                 }
                 logger.debug("active_bugs: version=%s introduced_bug=%s", version_id, row["id"])
             elif row["type"] == "bugfix":
-                # A bugfix may neutralise multiple bugs via fix_neutralises table
                 fix_id = row["id"]
-                # first try fix_neutralises
+                # read neutralisations from fix_neutralises table
                 nrows = [r["bug_id"] for r in conn.execute("SELECT bug_id FROM fix_neutralises WHERE fix_id = ?", (fix_id,))]
-                if nrows:
-                    for nid in nrows:
-                        fixes.add(nid)
-                        logger.debug("active_bugs: version=%s bugfix=%s neutralises=%s", version_id, fix_id, nid)
-                # legacy single-column fallback removed; neutralisations are read from fix_neutralises
+                for nid in nrows:
+                    fixes.add(nid)
+                    logger.debug("active_bugs: version=%s bugfix=%s neutralises=%s", version_id, fix_id, nid)
 
     neutralised = [i for i in introduced.keys() if i in fixes]
     if neutralised:
@@ -153,6 +150,37 @@ def build_tree(current_root, predecessor_root=None):
                         nrows = [r["bug_id"] for r in conn.execute("SELECT bug_id FROM fix_neutralises WHERE fix_id = ?", (fix_id,))]
                         neutralises = nrows
                         fixes.append({"id": row["id"], "title": row["title"], "description": row["description"], "neutralises": neutralises})
+
+            # Additionally infer implicit fixes by comparing aggregated bugs in subtree
+            # Compute aggregated active bugs for current node subtree and predecessor subtree
+            curr_nodes = containment_nodes(conn, node)
+            pred_nodes = containment_nodes(conn, pred_version) if pred_version else set()
+
+            def agg_bugs_for_nodes(nodeset):
+                agg = set()
+                for vid in nodeset:
+                    # collect active bugs (direct) for each version in the containment subtree
+                    for b in active_bugs(conn, vid):
+                        agg.add(b["id"])
+                return agg
+
+            curr_agg = agg_bugs_for_nodes(curr_nodes)
+            pred_agg = agg_bugs_for_nodes(pred_nodes)
+
+            # Bugs fixed are those present in predecessor subtree but not in current subtree
+            implicit_fixed = sorted(pred_agg - curr_agg)
+            # gather already-neutralised ids from explicit fixes
+            explicit_neuts = set()
+            for f in fixes:
+                for n in f.get("neutralises", []):
+                    if n:
+                        explicit_neuts.add(n)
+            for bid in implicit_fixed:
+                if bid in explicit_neuts:
+                    continue
+                synth_id = f"IMPL_fix_{bid}_{node}"
+                fixes.append({"id": synth_id, "title": "Implicit fix (dependency removal)", "description": "Implicitly fixed due to dependency removal", "neutralises": [bid]})
+                logger.info("compute_interval_for_element: node=%s implicitly_fixed=%s", node, bid)
 
         logger.debug("compute_interval_for_element: node=%s pred_version=%s introduced=%d fixes=%d", node, pred_version, len(introduced), len(fixes))
         return pred_version, {"introduced": introduced, "fixes": fixes}
